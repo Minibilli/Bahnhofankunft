@@ -1,0 +1,178 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#ec0016">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon-192.png">
+<link rel="apple-touch-icon" href="icon-192.png">
+<title>Ankünfte</title>
+<style>
+  :root { --bg:#111; --fg:#f2f2f2; --mut:#999; --ok:#4cd964; --late:#ff9f0a; --bad:#ff453a; --card:#1c1c1e; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:16px system-ui, sans-serif; }
+  header { padding:14px 16px 10px; position:sticky; top:0; background:var(--bg); border-bottom:1px solid #2a2a2a; z-index:5; }
+  h1 { margin:0; font-size:20px; }
+  .sub { color:var(--mut); font-size:13px; margin-top:2px; }
+  .row { display:flex; gap:8px; margin-top:10px; position:relative; }
+  input { flex:1; min-width:0; background:var(--card); color:var(--fg); border:1px solid #333; border-radius:8px; padding:10px 12px; font-size:16px; }
+  button { background:#ec0016; color:#fff; border:0; border-radius:8px; padding:10px 14px; font-size:14px; }
+  button.sec { background:#333; }
+  #sugg { position:absolute; top:100%; left:0; right:0; background:var(--card); border:1px solid #333; border-radius:8px; margin-top:4px; max-height:50vh; overflow:auto; display:none; }
+  #sugg div { padding:12px 14px; border-bottom:1px solid #2a2a2a; }
+  #sugg div:last-child { border-bottom:0; }
+  ul { list-style:none; margin:0; padding:8px 12px 12px; }
+  li { background:var(--card); border-radius:12px; padding:12px 14px; margin-bottom:8px; display:grid; grid-template-columns:64px 1fr auto; gap:2px 12px; align-items:center; }
+  .time { font-size:22px; font-weight:700; }
+  .line { font-weight:600; }
+  .from { color:var(--mut); font-size:14px; grid-column:2; }
+  .delay { font-weight:700; text-align:right; grid-row:1 / span 2; grid-column:3; }
+  .ok { color:var(--ok); } .late { color:var(--late); } .bad { color:var(--bad); }
+  #msg { padding:16px; color:var(--mut); }
+  footer { padding:0 16px 24px; color:var(--mut); font-size:12px; }
+  footer a { color:var(--mut); }
+</style>
+</head>
+<body>
+<header>
+  <h1 id="station">Ankünfte</h1>
+  <div class="sub" id="upd">Bahnhof eingeben oder Standort nutzen</div>
+  <div class="row">
+    <input id="q" type="search" placeholder="Bahnhof suchen …" autocomplete="off">
+    <button id="loc" class="sec" title="Standort nutzen">Standort</button>
+    <button id="reload" title="Aktualisieren">&#x21bb;</button>
+    <div id="sugg"></div>
+  </div>
+</header>
+<div id="msg"></div>
+<ul id="list"></ul>
+<footer>Daten: <a href="https://transitous.org/sources/">Transitous</a> · Karten: © OpenStreetMap-Mitwirkende</footer>
+
+<script>
+const API = "https://api.transitous.org/api";
+const $ = id => document.getElementById(id);
+let stop = null;
+let timer = null;
+
+const fmt = iso => new Date(iso).toLocaleTimeString("de-DE", {hour:"2-digit", minute:"2-digit"});
+const save = s => { try { localStorage.setItem("stop", JSON.stringify(s)); } catch (e) {} };
+const restore = () => { try { return JSON.parse(localStorage.getItem("stop")); } catch (e) { return null; } };
+
+async function api(path) {
+  let r;
+  try { r = await fetch(API + path); }
+  catch (e) { throw new Error("keine Verbindung zu api.transitous.org (Netz/CORS)"); }
+  if (!r.ok) throw new Error("Server meldet HTTP " + r.status);
+  return r.json();
+}
+
+function getPos() {
+  return new Promise((res, rej) =>
+    navigator.geolocation.getCurrentPosition(res, rej, {enableHighAccuracy:true, timeout:15000, maximumAge:30000}));
+}
+
+async function stopFromLocation() {
+  const p = await getPos();
+  const j = await api(`/v1/reverse-geocode?place=${p.coords.latitude},${p.coords.longitude}&type=STOP`);
+  if (!j.length) throw new Error("Kein Bahnhof in der Nähe gefunden.");
+  return {id: j[0].id, name: j[0].name};
+}
+
+const RAIL = /RAIL|SUBURBAN|HIGHSPEED|LONG_DISTANCE|NIGHT|METRO/;
+
+async function load() {
+  $("msg").textContent = "";
+  if (!stop) return;
+  $("station").textContent = stop.name;
+  $("upd").textContent = "Lade …";
+  try {
+    const data = await api(`/v5/stoptimes?stopId=${encodeURIComponent(stop.id)}&n=25&arriveBy=true&time=${encodeURIComponent(new Date().toISOString())}&direction=LATER`);
+    let arr = data.stopTimes || [];
+    const rail = arr.filter(a => RAIL.test(a.mode || ""));
+    if (rail.length) arr = rail;
+    arr = arr.slice(0, 15);
+    const ul = $("list"); ul.innerHTML = "";
+    if (!arr.length) $("msg").textContent = "Keine Ankünfte gefunden.";
+    for (const a of arr) {
+      const pl = a.place || {};
+      const planned = pl.scheduledArrival || pl.arrival;
+      const actual = pl.arrival || planned;
+      const min = Math.round((new Date(actual) - new Date(planned)) / 60000);
+      let cls = "ok", txt = "pünktlich";
+      if (a.cancelled || a.tripCancelled) { cls = "bad"; txt = "fällt aus"; }
+      else if (!a.realTime) { cls = ""; txt = "keine Echtzeit"; }
+      else if (min >= 1) { cls = min >= 6 ? "bad" : "late"; txt = "+" + min + " min"; }
+      const li = document.createElement("li");
+      li.innerHTML = `<div class="time"></div><div class="line"></div><div class="delay ${cls}"></div><div class="from"></div>`;
+      li.querySelector(".time").textContent = fmt(actual);
+      li.querySelector(".line").textContent = a.displayName || a.routeShortName || "?";
+      li.querySelector(".delay").textContent = txt;
+      const from = (a.tripFrom && a.tripFrom.name) || "Herkunft unbekannt";
+      const track = pl.track ? " · Gl. " + pl.track : "";
+      const plan = (txt.startsWith("+") ? " · plan " + fmt(planned) : "");
+      li.querySelector(".from").textContent = "von " + from + track + plan;
+      ul.appendChild(li);
+    }
+    $("upd").textContent = "Stand " + new Date().toLocaleTimeString("de-DE", {hour:"2-digit", minute:"2-digit", second:"2-digit"});
+  } catch (e) {
+    $("upd").textContent = "Fehler";
+    $("msg").textContent = e.message;
+  }
+}
+
+function setStop(s) {
+  stop = s;
+  save(s);
+  $("q").value = "";
+  $("sugg").style.display = "none";
+  clearInterval(timer);
+  timer = setInterval(load, 60000);
+  load();
+}
+
+$("loc").onclick = async () => {
+  $("msg").textContent = "";
+  $("upd").textContent = "Standort wird ermittelt …";
+  try { setStop(await stopFromLocation()); }
+  catch (e) {
+    $("upd").textContent = "Fehler";
+    $("msg").textContent = e.code === 1 ? "Standortzugriff wurde verweigert. Bitte im Browser erlauben oder den Bahnhof eintippen." : e.message;
+  }
+};
+
+$("reload").onclick = load;
+
+let debounce = null;
+$("q").addEventListener("input", () => {
+  clearTimeout(debounce);
+  const v = $("q").value.trim();
+  if (v.length < 2) { $("sugg").style.display = "none"; return; }
+  debounce = setTimeout(async () => {
+    const box = $("sugg"); box.innerHTML = "";
+    try {
+      const j = (await api(`/v1/geocode?text=${encodeURIComponent(v)}&type=STOP&language=de`)).slice(0, 6);
+      for (const s of j) {
+        const d = document.createElement("div");
+        const area = (s.areas || []).find(a => a.default);
+        d.textContent = s.name + (area ? " · " + area.name : "");
+        d.onclick = () => setStop({id: s.id, name: s.name});
+        box.appendChild(d);
+      }
+      if (!j.length) box.innerHTML = "<div>Nichts gefunden</div>";
+    } catch (e) {
+      const d = document.createElement("div");
+      d.textContent = "Suche nicht erreichbar – " + e.message;
+      box.appendChild(d);
+    }
+    box.style.display = "block";
+  }, 300);
+});
+
+if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(() => {});
+
+const last = restore();
+if (last) setStop(last); else $("loc").click();
+</script>
+</body>
+</html>
