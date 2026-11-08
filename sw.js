@@ -1,5 +1,5 @@
 // Einfacher Service Worker: App-Hülle wird zwischengespeichert, Live-Daten nie.
-const CACHE = "ankuenfte-v3";
+const CACHE = "ankuenfte-v4";
 const SHELL = ["./", "./index.html", "./manifest.webmanifest", "./icon-192.png", "./icon-512.png"];
 
 self.addEventListener("install", e => {
@@ -18,7 +18,7 @@ self.addEventListener("fetch", e => {
   const url = new URL(e.request.url);
   if (e.request.method !== "GET" || url.origin !== self.location.origin) return; // API-Aufrufe gehen direkt ins Netz
   e.respondWith(
-    fetch(e.request)
+    fetch(e.request, {cache: "no-store"})   // am HTTP-Cache vorbei: immer die neueste Version
       .then(r => { const copy = r.clone(); caches.open(CACHE).then(c => c.put(e.request, copy)); return r; })
       .catch(() => caches.match(e.request))
   );
