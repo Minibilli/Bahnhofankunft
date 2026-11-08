@@ -98,13 +98,10 @@ const RAIL = /RAIL|SUBURBAN|HIGHSPEED|LONG_DISTANCE|NIGHT|METRO/;
 
 // ---------- Filter: Zugklassen und Zugnummern ----------
 const CLASSES = [
-  {key:"ICE",   label:"ICE",       test: p => p === "ICE" || p === "TGV" || p === "RJX" || p === "RJ"},
-  {key:"IC",    label:"IC/EC",     test: p => p === "IC" || p === "EC" || p === "ECE"},
-  {key:"NACHT", label:"Nachtzug",  test: p => p === "NJ" || p === "EN"},
-  {key:"RE",    label:"RE/IRE",    test: p => p === "RE" || p === "IRE" || p === "RX"},
-  {key:"RB",    label:"RB",        test: p => p === "RB"},
-  {key:"S",     label:"S-Bahn",    test: p => p === "S" || p === "SBB"},
-  {key:"SONST", label:"Sonstige",  test: null}
+  {key:"FERN",  label:"ICE/IC",   test: p => ["ICE","TGV","RJX","RJ","IC","EC","ECE"].includes(p)},
+  {key:"REG",   label:"RE/RB",    test: p => ["RE","IRE","RX","RB"].includes(p)},
+  {key:"S",     label:"S-Bahn",   test: p => p === "S" || p === "SBB"},
+  {key:"SONST", label:"Sonstige", test: null}
 ];
 let selClasses = new Set();
 let numQuery = "";
@@ -112,7 +109,8 @@ let numQuery = "";
 const loadFilter = () => {
   try {
     const f = JSON.parse(localStorage.getItem("filter") || "{}");
-    selClasses = new Set(f.classes || []);
+    const valid = CLASSES.map(c => c.key);
+    selClasses = new Set((f.classes || []).filter(k => valid.includes(k)));
     numQuery = f.num || "";
   } catch (e) {}
 };
