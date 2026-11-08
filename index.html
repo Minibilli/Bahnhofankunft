@@ -29,6 +29,13 @@
   .from { color:var(--mut); font-size:14px; grid-column:2; }
   .delay { font-weight:700; text-align:right; grid-row:1 / span 2; grid-column:3; }
   .ok { color:var(--ok); } .late { color:var(--late); } .bad { color:var(--bad); }
+  .filters { margin-top:10px; }
+  .chips { display:flex; gap:6px; overflow-x:auto; padding-bottom:2px; -webkit-overflow-scrolling:touch; }
+  .chip { flex:0 0 auto; background:var(--card); color:var(--fg); border:1px solid #333; border-radius:999px; padding:7px 14px; font-size:14px; }
+  .chip.on { background:#ec0016; border-color:#ec0016; color:#fff; }
+  .numrow { display:flex; gap:8px; margin-top:8px; }
+  .numrow input { padding:8px 12px; font-size:15px; }
+  #cnt { color:var(--mut); font-size:12px; margin-top:6px; }
   #msg { padding:16px; color:var(--mut); }
   footer { padding:0 16px 24px; color:var(--mut); font-size:12px; }
   footer a { color:var(--mut); }
@@ -43,6 +50,14 @@
     <button id="loc" class="sec" title="Standort nutzen">Standort</button>
     <button id="reload" title="Aktualisieren">&#x21bb;</button>
     <div id="sugg"></div>
+  </div>
+  <div class="filters">
+    <div class="chips" id="chips"></div>
+    <div class="numrow">
+      <input id="num" type="search" placeholder="Zugnummer, z. B. 1601, RE 5" autocomplete="off" inputmode="text">
+      <button id="clr" class="sec" title="Filter zurücksetzen">Zurücksetzen</button>
+    </div>
+    <div id="cnt"></div>
   </div>
 </header>
 <div id="msg"></div>
@@ -81,39 +96,121 @@ async function stopFromLocation() {
 
 const RAIL = /RAIL|SUBURBAN|HIGHSPEED|LONG_DISTANCE|NIGHT|METRO/;
 
+// ---------- Filter: Zugklassen und Zugnummern ----------
+const CLASSES = [
+  {key:"ICE",   label:"ICE",       test: p => p === "ICE" || p === "TGV" || p === "RJX" || p === "RJ"},
+  {key:"IC",    label:"IC/EC",     test: p => p === "IC" || p === "EC" || p === "ECE"},
+  {key:"NACHT", label:"Nachtzug",  test: p => p === "NJ" || p === "EN"},
+  {key:"RE",    label:"RE/IRE",    test: p => p === "RE" || p === "IRE" || p === "RX"},
+  {key:"RB",    label:"RB",        test: p => p === "RB"},
+  {key:"S",     label:"S-Bahn",    test: p => p === "S" || p === "SBB"},
+  {key:"SONST", label:"Sonstige",  test: null}
+];
+let selClasses = new Set();
+let numQuery = "";
+
+const loadFilter = () => {
+  try {
+    const f = JSON.parse(localStorage.getItem("filter") || "{}");
+    selClasses = new Set(f.classes || []);
+    numQuery = f.num || "";
+  } catch (e) {}
+};
+const saveFilter = () => {
+  try { localStorage.setItem("filter", JSON.stringify({classes:[...selClasses], num:numQuery})); } catch (e) {}
+};
+
+// Buchstaben-Präfix des Zuges, z. B. "ICE 1601" -> "ICE", "S 1" -> "S"
+function prefixOf(a) {
+  const src = (a.routeShortName || a.displayName || "").toUpperCase().trim();
+  const m = src.match(/^[A-ZÄÖÜ]+/);
+  return m ? m[0] : "";
+}
+function classKeyOf(a) {
+  const p = prefixOf(a);
+  for (const c of CLASSES) if (c.test && c.test(p)) return c.key;
+  return "SONST";
+}
+function matchesNumber(a, tokens) {
+  if (!tokens.length) return true;
+  const names = [a.displayName, a.routeShortName, a.tripShortName]
+    .filter(Boolean).map(s => String(s).toUpperCase().replace(/\s+/g, ""));
+  return tokens.some(t => names.some(n => {
+    if (/^\d+$/.test(t)) {                 // nur Ziffern: Zugnummer muss exakt stimmen
+      const d = n.match(/(\d+)$/);
+      return d ? d[1] === t : false;
+    }
+    return n.startsWith(t);                // sonst Anfang, z. B. "ICE", "ICE16", "RE5"
+  }));
+}
+function applyFilter(arr) {
+  const tokens = numQuery.split(/[,;]+/).map(s => s.toUpperCase().replace(/\s+/g, "")).filter(Boolean);
+  return arr.filter(a => (!selClasses.size || selClasses.has(classKeyOf(a))) && matchesNumber(a, tokens));
+}
+function drawChips() {
+  const box = $("chips"); box.innerHTML = "";
+  const all = document.createElement("button");
+  all.className = "chip" + (selClasses.size ? "" : " on");
+  all.textContent = "Alle";
+  all.onclick = () => { selClasses.clear(); saveFilter(); drawChips(); render(); };
+  box.appendChild(all);
+  for (const c of CLASSES) {
+    const b = document.createElement("button");
+    b.className = "chip" + (selClasses.has(c.key) ? " on" : "");
+    b.textContent = c.label;
+    b.onclick = () => { selClasses.has(c.key) ? selClasses.delete(c.key) : selClasses.add(c.key); saveFilter(); drawChips(); render(); };
+    box.appendChild(b);
+  }
+}
+
+let rows = [];   // zuletzt geladene Ankünfte (ungefiltert)
+function render() {
+  const ul = $("list"); ul.innerHTML = "";
+  $("msg").textContent = "";
+  if (!stop) return;
+  const filtered = applyFilter(rows);
+  const arr = filtered.slice(0, 15);
+  const active = selClasses.size || numQuery.trim();
+  $("cnt").textContent = rows.length ? (active ? `${arr.length} von ${rows.length} Zügen (Filter aktiv)` : "") : "";
+  if (!rows.length) { if (loaded) $("msg").textContent = "Keine Ankünfte gefunden."; return; }
+  if (!arr.length) { $("msg").textContent = "Kein Zug passt zum Filter. Setze den Filter zurück oder wähle andere Klassen/Nummern."; return; }
+  for (const a of arr) {
+    const pl = a.place || {};
+    const planned = pl.scheduledArrival || pl.arrival;
+    const actual = pl.arrival || planned;
+    const min = Math.round((new Date(actual) - new Date(planned)) / 60000);
+    let cls = "ok", txt = "pünktlich";
+    if (a.cancelled || a.tripCancelled) { cls = "bad"; txt = "fällt aus"; }
+    else if (!a.realTime) { cls = ""; txt = "keine Echtzeit"; }
+    else if (min >= 1) { cls = min >= 6 ? "bad" : "late"; txt = "+" + min + " min"; }
+    const li = document.createElement("li");
+    li.innerHTML = `<div class="time"></div><div class="line"></div><div class="delay ${cls}"></div><div class="from"></div>`;
+    li.querySelector(".time").textContent = fmt(actual);
+    li.querySelector(".line").textContent = a.displayName || a.routeShortName || "?";
+    li.querySelector(".delay").textContent = txt;
+    const from = (a.tripFrom && a.tripFrom.name) || "Herkunft unbekannt";
+    const track = pl.track ? " · Gl. " + pl.track : "";
+    const plan = (txt.startsWith("+") ? " · plan " + fmt(planned) : "");
+    li.querySelector(".from").textContent = "von " + from + track + plan;
+    ul.appendChild(li);
+  }
+}
+let loaded = false;
+
 async function load() {
   $("msg").textContent = "";
   if (!stop) return;
   $("station").textContent = stop.name;
   $("upd").textContent = "Lade …";
   try {
-    const data = await api(`/v5/stoptimes?stopId=${encodeURIComponent(stop.id)}&n=25&arriveBy=true&time=${encodeURIComponent(new Date().toISOString())}&direction=LATER`);
+    // Mehr Zeilen laden, damit nach dem Filtern noch genug übrig bleiben
+    const data = await api(`/v5/stoptimes?stopId=${encodeURIComponent(stop.id)}&n=60&arriveBy=true&time=${encodeURIComponent(new Date().toISOString())}&direction=LATER`);
     let arr = data.stopTimes || [];
     const rail = arr.filter(a => RAIL.test(a.mode || ""));
     if (rail.length) arr = rail;
-    arr = arr.slice(0, 15);
-    const ul = $("list"); ul.innerHTML = "";
-    if (!arr.length) $("msg").textContent = "Keine Ankünfte gefunden.";
-    for (const a of arr) {
-      const pl = a.place || {};
-      const planned = pl.scheduledArrival || pl.arrival;
-      const actual = pl.arrival || planned;
-      const min = Math.round((new Date(actual) - new Date(planned)) / 60000);
-      let cls = "ok", txt = "pünktlich";
-      if (a.cancelled || a.tripCancelled) { cls = "bad"; txt = "fällt aus"; }
-      else if (!a.realTime) { cls = ""; txt = "keine Echtzeit"; }
-      else if (min >= 1) { cls = min >= 6 ? "bad" : "late"; txt = "+" + min + " min"; }
-      const li = document.createElement("li");
-      li.innerHTML = `<div class="time"></div><div class="line"></div><div class="delay ${cls}"></div><div class="from"></div>`;
-      li.querySelector(".time").textContent = fmt(actual);
-      li.querySelector(".line").textContent = a.displayName || a.routeShortName || "?";
-      li.querySelector(".delay").textContent = txt;
-      const from = (a.tripFrom && a.tripFrom.name) || "Herkunft unbekannt";
-      const track = pl.track ? " · Gl. " + pl.track : "";
-      const plan = (txt.startsWith("+") ? " · plan " + fmt(planned) : "");
-      li.querySelector(".from").textContent = "von " + from + track + plan;
-      ul.appendChild(li);
-    }
+    rows = arr;
+    loaded = true;
+    render();
     $("upd").textContent = "Stand " + new Date().toLocaleTimeString("de-DE", {hour:"2-digit", minute:"2-digit", second:"2-digit"});
   } catch (e) {
     $("upd").textContent = "Fehler";
@@ -123,6 +220,7 @@ async function load() {
 
 function setStop(s) {
   stop = s;
+  rows = []; loaded = false;
   save(s);
   $("q").value = "";
   $("sugg").style.display = "none";
@@ -168,6 +266,12 @@ $("q").addEventListener("input", () => {
     box.style.display = "block";
   }, 300);
 });
+
+loadFilter();
+$("num").value = numQuery;
+drawChips();
+$("num").addEventListener("input", () => { numQuery = $("num").value; saveFilter(); render(); });
+$("clr").onclick = () => { selClasses.clear(); numQuery = ""; $("num").value = ""; saveFilter(); drawChips(); render(); };
 
 if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(() => {});
 
